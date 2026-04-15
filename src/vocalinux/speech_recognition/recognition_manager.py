@@ -963,6 +963,7 @@ class SpeechRecognitionManager:
             ComputeBackend,
             detect_compute_backend,
             get_backend_display_name,
+            select_preferred_vulkan_device,
         )
 
         requested_gpu = self._resolve_requested_gpu([ComputeBackend.VULKAN, ComputeBackend.CUDA])
@@ -974,6 +975,23 @@ class SpeechRecognitionManager:
         # Detect and log compute backend
         backend, backend_info = detect_compute_backend()
         logger.info(f"whisper.cpp backend selection priority: Vulkan -> CUDA -> CPU")
+
+        if backend == ComputeBackend.VULKAN:
+            preferred_vulkan_device = select_preferred_vulkan_device()
+            if preferred_vulkan_device is not None:
+                device_index, device_name = preferred_vulkan_device
+                os.environ["GGML_VK_VISIBLE_DEVICES"] = str(device_index)
+                backend_info = f"{device_name} (device {device_index})"
+                logger.info(
+                    "whisper.cpp auto-selected Vulkan device %s: %s",
+                    device_index,
+                    device_name,
+                )
+            else:
+                os.environ.pop("GGML_VK_VISIBLE_DEVICES", None)
+        else:
+            os.environ.pop("GGML_VK_VISIBLE_DEVICES", None)
+
         logger.info(
             f"whisper.cpp using {get_backend_display_name(backend)} backend: {backend_info}"
         )

@@ -148,6 +148,24 @@ class TestDetectVulkanSupport(unittest.TestCase):
             self.assertTrue(is_available)
             self.assertIsNotNone(device_name)
 
+    def test_detect_vulkan_support_ignores_device_type_lines(self):
+        """Test Vulkan detection prefers deviceName over generic GPU type lines."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=(
+                    "deviceType         = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU\n"
+                    "deviceName         = Tesla P40\n"
+                ),
+            )
+
+            from vocalinux.utils.whispercpp_model_info import detect_vulkan_support
+
+            is_available, device_name = detect_vulkan_support()
+
+            self.assertTrue(is_available)
+            self.assertEqual(device_name, "Tesla P40")
+
     def test_detect_vulkan_support_when_unavailable(self):
         """Test Vulkan detection when vulkaninfo is not available."""
         with patch("subprocess.run") as mock_run:
@@ -358,7 +376,10 @@ class TestDetectCudaSupport(unittest.TestCase):
     def test_detect_cuda_support_when_available(self):
         """Test CUDA detection when nvidia-smi is available."""
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="NVIDIA RTX 3080, 10240 MiB\n")
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="0, NVIDIA RTX 3080, 10240\n",
+            )
 
             from vocalinux.utils.whispercpp_model_info import detect_cuda_support
 
@@ -367,6 +388,45 @@ class TestDetectCudaSupport(unittest.TestCase):
             self.assertTrue(is_available)
             self.assertIsNotNone(device_info)
             self.assertIn("RTX 3080", device_info)
+
+    def test_detect_cuda_support_prefers_highest_vram_device(self):
+        """Test CUDA detection chooses the highest-VRAM GPU."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="0, NVIDIA T1000, 4096\n1, Tesla P40, 24576\n",
+            )
+
+            from vocalinux.utils.whispercpp_model_info import detect_cuda_support
+
+            is_available, device_info = detect_cuda_support()
+
+            self.assertTrue(is_available)
+            self.assertEqual(device_info, "Tesla P40 (24576 MiB)")
+
+
+class TestPreferredVulkanDevice(unittest.TestCase):
+    """Tests for automatic Vulkan device selection."""
+
+    def test_select_preferred_vulkan_device_matches_best_cuda_gpu(self):
+        with (
+            patch(
+                "vocalinux.utils.whispercpp_model_info.list_vulkan_devices",
+                return_value=[(0, "NVIDIA T1000"), (1, "Tesla P40"), (2, "Intel Graphics")],
+            ),
+            patch(
+                "vocalinux.utils.whispercpp_model_info.list_cuda_devices",
+                return_value=[
+                    (0, "NVIDIA T1000", 4096),
+                    (1, "Tesla P40", 24576),
+                ],
+            ),
+        ):
+            from vocalinux.utils.whispercpp_model_info import select_preferred_vulkan_device
+
+            preferred = select_preferred_vulkan_device()
+
+            self.assertEqual(preferred, (1, "Tesla P40"))
 
     def test_detect_cuda_support_when_unavailable(self):
         """Test CUDA detection when nvidia-smi is not available."""

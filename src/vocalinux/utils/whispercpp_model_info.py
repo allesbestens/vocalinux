@@ -99,18 +99,18 @@ def list_vulkan_devices() -> list[tuple[int, str]]:
     return devices
 
 
-def list_cuda_devices() -> list[tuple[int, str]]:
+def list_cuda_devices() -> list[tuple[int, str, Optional[int]]]:
     """
     Enumerate CUDA devices visible to the current process.
 
     Returns:
-        List of ``(index, name)`` tuples in the order reported by ``nvidia-smi``.
+        List of ``(index, name, memory_mib)`` tuples in the order reported by ``nvidia-smi``.
     """
-    devices: list[tuple[int, str]] = []
+    devices: list[tuple[int, str, Optional[int]]] = []
 
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,name", "--format=csv,noheader"],
+            ["nvidia-smi", "--query-gpu=index,name,memory.total", "--format=csv,noheader,nounits"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -123,8 +123,8 @@ def list_cuda_devices() -> list[tuple[int, str]]:
             if not raw_line:
                 continue
 
-            parts = [part.strip() for part in raw_line.split(",", 1)]
-            if len(parts) != 2:
+            parts = [part.strip() for part in raw_line.split(",", 2)]
+            if len(parts) < 2:
                 continue
 
             try:
@@ -132,7 +132,14 @@ def list_cuda_devices() -> list[tuple[int, str]]:
             except ValueError:
                 continue
 
-            devices.append((device_index, parts[1]))
+            memory_mib = None
+            if len(parts) > 2:
+                try:
+                    memory_mib = int(float(parts[2]))
+                except ValueError:
+                    memory_mib = None
+
+            devices.append((device_index, parts[1], memory_mib))
     except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
         logger.debug(f"CUDA device enumeration failed: {e}")
 
@@ -179,7 +186,11 @@ def resolve_gpu_selection(
         if enumerator is None:
             continue
 
-        for device_index, device_name in enumerator():
+        for device in enumerator():
+            if len(device) < 2:
+                continue
+
+            device_index, device_name = device[:2]
             available_devices.append(f"{backend}:{device_name}")
             normalized_device = _normalize_gpu_name(device_name)
             candidate = (backend, device_index, device_name)
@@ -203,6 +214,43 @@ def resolve_gpu_selection(
     raise ValueError(f"GPU '{requested_name}' not found. Available GPUs: {available}")
 
 
+def select_preferred_vulkan_device() -> Optional[tuple[int, str]]:
+    """
+    Select the most suitable Vulkan device for automatic whisper.cpp use.
+
+    Preference order:
+    1. Vulkan device matching the highest-VRAM CUDA device
+    2. First enumerated Vulkan device
+    """
+    vulkan_devices = list_vulkan_devices()
+    if not vulkan_devices:
+        return None
+
+    cuda_devices = list_cuda_devices()
+    if cuda_devices:
+        best_cuda = max(cuda_devices, key=lambda item: (item[2] or -1, -item[0]))
+        best_cuda_name = _normalize_gpu_name(best_cuda[1])
+
+        exact_matches = [
+            (device_index, device_name)
+            for device_index, device_name in vulkan_devices
+            if _normalize_gpu_name(device_name) == best_cuda_name
+        ]
+        if exact_matches:
+            return exact_matches[0]
+
+        partial_matches = [
+            (device_index, device_name)
+            for device_index, device_name in vulkan_devices
+            if best_cuda_name in _normalize_gpu_name(device_name)
+            or _normalize_gpu_name(device_name) in best_cuda_name
+        ]
+        if partial_matches:
+            return partial_matches[0]
+
+    return vulkan_devices[0]
+
+
 def detect_vulkan_support() -> tuple[bool, Optional[str]]:
     """
     Detect if Vulkan is available and get device info.
@@ -211,10 +259,9 @@ def detect_vulkan_support() -> tuple[bool, Optional[str]]:
         Tuple of (is_available, device_name)
     """
     try:
-        # Check for vulkaninfo command
-        devices = list_vulkan_devices()
-        if devices:
-            _, device_name = devices[0]
+        preferred_device = select_preferred_vulkan_device()
+        if preferred_device:
+            _, device_name = preferred_device
             logger.info(f"Vulkan support detected: {device_name}")
             return True, device_name
     except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
@@ -231,20 +278,12 @@ def detect_cuda_support() -> tuple[bool, Optional[str]]:
         Tuple of (is_available, device_info)
     """
     try:
-        # Check for nvidia-smi
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            gpu_info = result.stdout.strip().split(",")
-            if gpu_info:
-                gpu_name = gpu_info[0].strip()
-                gpu_memory = gpu_info[1].strip() if len(gpu_info) > 1 else "unknown"
-                logger.info(f"CUDA support detected: {gpu_name} ({gpu_memory})")
-                return True, f"{gpu_name} ({gpu_memory})"
+        cuda_devices = list_cuda_devices()
+        if cuda_devices:
+            _, gpu_name, memory_mib = max(cuda_devices, key=lambda item: (item[2] or -1, -item[0]))
+            gpu_memory = f"{memory_mib} MiB" if memory_mib is not None else "unknown"
+            logger.info(f"CUDA support detected: {gpu_name} ({gpu_memory})")
+            return True, f"{gpu_name} ({gpu_memory})"
     except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
         logger.debug(f"CUDA detection failed: {e}")
 
