@@ -309,6 +309,26 @@ def detect_cpu_info() -> str:
     return "CPU"
 
 
+def _system_memory_gib(total_bytes: int) -> int:
+    """Convert a byte count to whole GiB for display and heuristics."""
+    return total_bytes // (1024**3)
+
+
+def _parse_memory_gib(memory_info: str) -> Optional[int]:
+    """Extract an approximate GiB value from memory strings like '24GB' or '24576 MiB'."""
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(MiB|GiB|GB)\b", memory_info, flags=re.IGNORECASE)
+    if not match:
+        return None
+
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+
+    if unit == "mib":
+        return max(1, int(value // 1024))
+
+    return max(1, int(value))
+
+
 def get_recommended_model() -> tuple[str, str]:
     """
     Get the recommended whisper.cpp model based on system configuration.
@@ -319,39 +339,36 @@ def get_recommended_model() -> tuple[str, str]:
     try:
         import psutil
 
-        ram_gb = psutil.virtual_memory().total // (1024**3)
+        system_ram_gib = _system_memory_gib(psutil.virtual_memory().total)
 
         # Detect available compute backends
         backend, backend_info = detect_compute_backend()
 
         if backend == ComputeBackend.VULKAN:
-            # Vulkan can handle larger models efficiently
-            if ram_gb >= 8:
-                return "small", f"Vulkan GPU with {ram_gb}GB RAM"
+            # Vulkan recommendations use system RAM because VRAM is not detected here.
+            reason = f"Vulkan GPU detected; using {system_ram_gib} GiB system RAM heuristic"
+            if system_ram_gib >= 8:
+                return "small", reason
             else:
-                return "base", f"Vulkan GPU with {ram_gb}GB RAM"
+                return "base", reason
         elif backend == ComputeBackend.CUDA:
-            # CUDA has more VRAM typically
-            if "GB" in backend_info:
-                try:
-                    vram_gb = int(backend_info.split("GB")[0].split("(")[-1].strip())
-                    if vram_gb >= 8:
-                        return "medium", f"CUDA GPU with {vram_gb}GB VRAM"
-                    elif vram_gb >= 4:
-                        return "small", f"CUDA GPU with {vram_gb}GB VRAM"
-                    else:
-                        return "base", f"CUDA GPU with limited VRAM"
-                except (ValueError, IndexError):
-                    pass
-            return "small", f"CUDA GPU detected"
+            vram_gib = _parse_memory_gib(backend_info)
+            if vram_gib is not None:
+                if vram_gib >= 8:
+                    return "medium", f"CUDA GPU with {vram_gib} GiB VRAM"
+                elif vram_gib >= 4:
+                    return "small", f"CUDA GPU with {vram_gib} GiB VRAM"
+                else:
+                    return "base", "CUDA GPU with limited VRAM"
+            return "small", f"CUDA GPU detected ({backend_info})"
         else:
             # CPU-only recommendations based on RAM
-            if ram_gb >= 16:
-                return "base", f"{ram_gb}GB RAM - CPU inference"
-            elif ram_gb >= 8:
-                return "tiny", f"{ram_gb}GB RAM - optimized for speed"
+            if system_ram_gib >= 16:
+                return "base", f"{system_ram_gib} GiB system RAM - CPU inference"
+            elif system_ram_gib >= 8:
+                return "tiny", f"{system_ram_gib} GiB system RAM - optimized for speed"
             else:
-                return "tiny", f"Limited RAM ({ram_gb}GB) - fastest model"
+                return "tiny", f"Limited system RAM ({system_ram_gib} GiB) - fastest model"
 
     except ImportError:
         logger.debug("psutil not available for system detection")

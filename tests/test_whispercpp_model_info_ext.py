@@ -558,6 +558,10 @@ class TestGetRecommendedModel(unittest.TestCase):
                 model, reason = get_recommended_model()
 
                 self.assertEqual(model, "small")
+                self.assertEqual(
+                    reason,
+                    "Vulkan GPU detected; using 8 GiB system RAM heuristic",
+                )
 
     def test_get_recommended_model_with_cuda_high_vram(self):
         """Test model recommendation with CUDA and high VRAM."""
@@ -579,6 +583,26 @@ class TestGetRecommendedModel(unittest.TestCase):
                 # High VRAM should recommend medium or higher
                 self.assertIn(model, ["medium", "large", "small"])
 
+    def test_get_recommended_model_with_cuda_mib_vram(self):
+        """Test CUDA recommendation parses nvidia-smi style MiB values."""
+        import sys
+
+        mock_psutil = MagicMock()
+        mock_psutil.virtual_memory.return_value = MagicMock(total=16 * (1024**3))
+
+        with patch.dict("sys.modules", {"psutil": mock_psutil}):
+            with patch(
+                "vocalinux.utils.whispercpp_model_info.detect_compute_backend"
+            ) as mock_backend:
+                mock_backend.return_value = ("cuda", "NVIDIA Tesla P40 (24576 MiB)")
+
+                from vocalinux.utils.whispercpp_model_info import get_recommended_model
+
+                model, reason = get_recommended_model()
+
+                self.assertEqual(model, "medium")
+                self.assertEqual(reason, "CUDA GPU with 24 GiB VRAM")
+
     def test_get_recommended_model_with_cpu_high_ram(self):
         """Test model recommendation with CPU and 16GB+ RAM."""
         import sys
@@ -597,6 +621,7 @@ class TestGetRecommendedModel(unittest.TestCase):
                 model, reason = get_recommended_model()
 
                 self.assertEqual(model, "base")
+                self.assertEqual(reason, "16 GiB system RAM - CPU inference")
 
     def test_get_recommended_model_with_cpu_medium_ram(self):
         """Test model recommendation with CPU and 8GB RAM."""
