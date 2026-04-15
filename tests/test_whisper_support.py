@@ -5,7 +5,7 @@ Tests for Whisper speech recognition support.
 import os
 import sys
 import types
-from unittest.mock import MagicMock, patch  # noqa: F401
+from unittest.mock import MagicMock, Mock, patch  # noqa: F401
 
 # Mock GTK and other dependencies before importing vocalinux
 sys.modules["gi"] = MagicMock()
@@ -171,3 +171,54 @@ class TestWhisperSupport:
                 assert os.environ["GGML_VULKAN"] == "0"
                 assert os.environ["GGML_CUDA"] == "0"
                 notify_mock.assert_called_once()
+
+    def test_whispercpp_sets_visible_vulkan_device_for_auto_selection(self):
+        model_ctor = Mock(return_value=object())
+
+        pywhispercpp_pkg = types.ModuleType("pywhispercpp")
+        pywhispercpp_model = types.ModuleType("pywhispercpp.model")
+        setattr(pywhispercpp_model, "Model", model_ctor)
+        setattr(pywhispercpp_pkg, "model", pywhispercpp_model)
+
+        psutil_mock = MagicMock()
+        psutil_mock.virtual_memory.return_value = MagicMock(total=8 * (1024**3))
+
+        with patch.dict(
+            sys.modules,
+            {
+                "pywhispercpp": pywhispercpp_pkg,
+                "pywhispercpp.model": pywhispercpp_model,
+                "psutil": psutil_mock,
+            },
+        ):
+            from vocalinux.speech_recognition import recognition_manager as rm
+
+            with (
+                patch("os.makedirs"),
+                patch("os.path.exists", return_value=True),
+                patch("os.path.getsize", return_value=1550 * 1024 * 1024),
+                patch("multiprocessing.cpu_count", return_value=4),
+                patch(
+                    "vocalinux.utils.whispercpp_model_info.detect_compute_backend",
+                    return_value=("vulkan", "Tesla P40"),
+                ),
+                patch(
+                    "vocalinux.utils.whispercpp_model_info.select_preferred_vulkan_device",
+                    return_value=(1, "Tesla P40"),
+                ),
+                patch(
+                    "vocalinux.utils.whispercpp_model_info.get_backend_display_name",
+                    return_value="Vulkan",
+                ),
+                patch(
+                    "vocalinux.speech_recognition.recognition_manager.get_model_path",
+                    return_value="/tmp/mock-ggml-large.bin",
+                ),
+                patch.dict(os.environ, {}, clear=False),
+            ):
+                manager = rm.SpeechRecognitionManager(
+                    engine="whisper_cpp", model_size="large", defer_download=False
+                )
+
+                assert manager.model is not None
+                assert os.environ["GGML_VK_VISIBLE_DEVICES"] == "1"
